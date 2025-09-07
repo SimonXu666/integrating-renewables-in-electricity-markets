@@ -1,15 +1,17 @@
+
 import gurobipy as gp
 from gurobipy import GRB
 
 model = gp.Model('A_two-stage_stochastic_programming')
 
 # 基础参数
-Ps, Pmax, C, CRU, CRD = gp.multidict({
-'P1': [50,10,16,15],
-'P2': [110,30,13,12],
-'P3': [100,35,10,9]})
 
-buses = ['bus1','bus2','bus3']
+Ps, Pmin, Pmax, SU, SD, C, CRU, CRD = gp.multidict({
+'P1': [0,50,10,10,10,16,15],
+'P2': [0,110,20,20,30,13,12],
+'P3': [0,100,60,60,35,10,9]})
+
+buses = ['bus1','bus2']
 
 load = {
 ('bus1',0): 40,
@@ -22,14 +24,19 @@ load = {
 Pwh = {0:50,1:65,2:35}
 Pwl = {0:10,1:30,2:15}
 
+line_capacity = 100
+
 # 创建变量
+# 机组启停状态是日前、日内统一的
+v = model.addVars(Ps,range(3), vtype=GRB.BINARY, name='v')
+
 P = model.addVars(Ps,range(3),name='P')
 RU = model.addVars(Ps,range(3),name='RU')
 RD = model.addVars(Ps,range(3),name='RD')
 
-P12 = model.addVars(range(3),lb=-100,ub=100,name='P12')
-P12h = model.addVars(range(3),lb=-100,ub=100,name='P12h')
-P12l = model.addVars(range(3),lb=-100,ub=100,name='P12l')
+P12 = model.addVars(range(3),lb=-line_capacity,ub=line_capacity,name='P12')
+P12h = model.addVars(range(3),lb=-line_capacity,ub=line_capacity,name='P12h')
+P12l = model.addVars(range(3),lb=-line_capacity,ub=line_capacity,name='P12l')
 
 rh = model.addVars(Ps,range(3),lb=-200,name='rh')
 rl = model.addVars(Ps,range(3),lb=-200,name='rl')
@@ -65,11 +72,9 @@ model.addConstrs((rl['P1',t]+rl['P2',t]-P12l[t]+P12[t]+Llshed['bus1',t]+Pwl[t]-W
 model.addConstrs((rl['P3',t]+P12l[t]-P12[t]+Llshed['bus2',t]==0\
                   for t in range(3)),name='low_scenario_bus2_balance')
 
-
-
-
-model.addConstrs((P[p,t]+RU[p,t]<=Pmax[p] for p in Ps for t in range(3)),name='day_ahead_up_constraint')
-model.addConstrs((P[p,t]-RD[p,t]>=0 for p in Ps for t in range(3)),name='day_ahead_down_constraint')
+# 日前就确定是否开机，可省略，在日内限制的情况下目标函数会引导
+#model.addConstrs((P[p,t]+RU[p,t]<=v[p,t]*Pmax[p] for p in Ps for t in range(3)),name='day_ahead_up_constraint')
+#model.addConstrs((P[p,t]-RD[p,t]>=v[p,t]*Pmin[p] for p in Ps for t in range(3)),name='day_ahead_down_constraint')
 
 model.addConstrs((-RD[p,t]<=rh[p,t] for p in Ps for t in range(3)),name='high_scenario_down_constraint')
 model.addConstrs((rh[p,t]<=RU[p,t] for p in Ps for t in range(3)),name='high_scenario_up_constraint')
@@ -77,15 +82,29 @@ model.addConstrs((-RD[p,t]<=rl[p,t] for p in Ps for t in range(3)),name='low_sce
 model.addConstrs((rl[p,t]<=RU[p,t] for p in Ps for t in range(3)),name='low_scenario_up_constraint')
 
 
-model.write('base case.lp')
+# 日内的出力约束
+model.addConstrs((P[p,t]+rh[p,t]<=v[p,t]*Pmax[p] for p in Ps for t in range(3)),name='high_scenario_P_constraint')
+model.addConstrs((P[p,t]+rh[p,t]>=v[p,t]*Pmin[p] for p in Ps for t in range(3)),name='high_scenario_P_constraint')
+model.addConstrs((P[p,t]+rl[p,t]<=v[p,t]*Pmax[p] for p in Ps for t in range(3)),name='low_scenario_P_constraint')
+model.addConstrs((P[p,t]+rl[p,t]>=v[p,t]*Pmin[p] for p in Ps for t in range(3)),name='low_scenario_P_constraint')
+
+# 爬坡约束
+model.addConstrs((P[p,t+1]+rh[p,t+1]-P[p,t]-rh[p,t]<=SU[p] for p in Ps for t in range(2)),name='high_scenario_P_constraint')
+model.addConstrs((P[p,t+1]+rh[p,t+1]-P[p,t]-rh[p,t]>=-SD[p] for p in Ps for t in range(2)),name='high_scenario_P_constraint')
+model.addConstrs((P[p,t+1]+rl[p,t+1]-P[p,t]-rl[p,t]<=SU[p] for p in Ps for t in range(2)),name='high_scenario_P_constraint')
+model.addConstrs((P[p,t+1]+rl[p,t+1]-P[p,t]-rl[p,t]>=-SD[p] for p in Ps for t in range(2)),name='high_scenario_P_constraint')
 
 # 求解
-
+model.write('base case.lp')
 model.optimize()
-# P1=50,P2=40,P3=40,R3D=40,r3h=-40,Ws=10,obj=2620
 
 for v in model.getVars():
     print(v.varName, v.x)
-    
 
-
+# =============================================================================
+# base case:6305
+# reduced flexible capacity:6315
+# minimum power output:6410
+# ramping limits: 6520
+# reduced transmission capacity: 6480
+# =============================================================================
